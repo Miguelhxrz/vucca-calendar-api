@@ -1,10 +1,11 @@
-// src/lib/prisma.js
+// src/prismaClient.js  (ESM)
 import { PrismaClient } from "@prisma/client";
-export const prisma = new PrismaClient();
 
-// opcional: cerrar conexión al terminar
-process.on("beforeExit", async () => {
-  await prisma.$disconnect();
-});
+const globalForPrisma = globalThis;
+const prisma = globalForPrisma.__prisma || new PrismaClient();
+
+if (process.env.NODE_ENV !== "production") {
+  globalForPrisma.__prisma = prisma;
+}
 
 export default prisma;
