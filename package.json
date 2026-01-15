@@ -7,8 +7,8 @@
     "start": "node src/server.js"
   },
   "dependencies": {
-    "@prisma/client": "^5.22.0",
-    "prisma": "^5.22.0",
+    "@prisma/client": "^6.x",
+    "prisma": "^6.x",
     "bcryptjs": "^2.4.3",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
