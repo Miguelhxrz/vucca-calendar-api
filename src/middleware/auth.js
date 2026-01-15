@@ -2,12 +2,19 @@
 import jwt from "jsonwebtoken";
 
 export const adminRequired = (req, res, next) => {
-  const t = req.cookies?.vucca_admin;
-  if (!t) return res.status(401).json({ error: "Unauthorized" });
+  const token = req.cookies?.vucca_admin;
+
+  if (!token) return res.status(401).json({ error: "Unauthorized" });
+
   try {
-    const p = jwt.verify(t, process.env.JWT_SECRET);
-    if (p.role !== "ADMIN") throw new Error();
-    next();
+    const payload = jwt.verify(token, process.env.JWT_SECRET);
+
+    if (payload?.role !== "ADMIN") {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    req.user = { role: payload.role };
+    return next();
   } catch {
     return res.status(401).json({ error: "Unauthorized" });
   }

@@ -1,21 +1,68 @@
-// --- Generador del cliente ---
+// prisma/schema.prisma
+
+// ---------- Generator ----------
 generator client {
   provider = "prisma-client-js"
 }
 
-// --- Conexión a la BD ---
+// ---------- Datasource ----------
 datasource db {
-  provider = "mysql"              // <— IMPORTANTE: MySQL
-  url      = env("DATABASE_URL")  // usa tu .env
+  provider = "mysql"
+  url      = env("DATABASE_URL")
 }
 
-// --- Modelos ---
+// ---------- Models ----------
 model Umpire {
-  id         Int      @id @default(autoincrement())
-  firstName  String   @db.VarChar(80)
-  lastName   String   @db.VarChar(80)
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  id        Int      @id @default(autoincrement())
+  firstName String   @db.VarChar(80)
+  lastName  String   @db.VarChar(80)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([lastName, firstName])
 }
+
+model Season {
+  id         Int         @id @default(autoincrement())
+  league     String
+  startDate  DateTime
+  totalWeeks Int         @default(1)
+  isFinished Boolean     @default(false)
+
+  assignments Assignment[]
+
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+}
+
+model Assignment {
+  id           Int      @id @default(autoincrement())
+  seasonId     Int
+  season       Season   @relation(fields: [seasonId], references: [id], onDelete: Cascade)
+  league       String   @db.VarChar(10)
+  weekNumber   Int
+  cellIndex    Int
+  rowIndex     Int
+  colIndex     Int
+  dayName      String   @db.VarChar(16)
+  dateStr      String   @db.VarChar(10)
+  stadiumCity  String   @db.VarChar(80)
+  stadiumName  String   @db.VarChar(120)
+  localTeam    String   @db.VarChar(40)
+  visitorsTeam String   @db.VarChar(40)
+  gameNumber   String?  @db.VarChar(10)
+  gameNumber2  String?  @db.VarChar(10)
+  gameTime     String?  @db.VarChar(20)
+  gameTime2    String?  @db.VarChar(20)
+  gameStatus   String   @db.VarChar(16)
+  isDoubleGame Boolean  @default(false)
+  isFinalGame  Boolean  @default(false)
+  umpires      Json
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([seasonId, weekNumber, cellIndex], name: "seasonId_weekNumber_cellIndex")
+  @@index([seasonId, weekNumber])
+  @@index([league, weekNumber])
+}
+
