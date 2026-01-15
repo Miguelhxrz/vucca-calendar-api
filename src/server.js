@@ -9,7 +9,7 @@ const rateLimit = require("express-rate-limit");
 
 const authRoutes = require("./routes/auth");
 const umpiresRoutes = require("./routes/umpires");
-const calendarRoutes = require("./routes/calendar");
+const calendarRoutes = require("./routes/assignments");
 const seasonsRoutes = require("./routes/seasons");
 const statsRoutes = require("./routes/stats");
 
@@ -95,7 +95,7 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 
 app.use("/auth", authLimiter, authRoutes);
 app.use("/umpires", umpiresRoutes);
-app.use("/calendar", calendarRoutes);
+app.use("/calendar", require("./routes/assignments"));
 app.use("/seasons", seasonsRoutes);
 app.use("/stats", statsRoutes);
 
