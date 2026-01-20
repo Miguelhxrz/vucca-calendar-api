@@ -4,8 +4,8 @@
   "main": "src/server.js",
   "scripts": {
     "postinstall": "prisma generate",
-    "start": "node src/server.js",
-    "migrate:deploy": "prisma migrate deploy"
+    "build": "echo \"build ok\"",
+    "start": "node src/server.js"
   },
   "dependencies": {
     "@prisma/client": "^6.x",
