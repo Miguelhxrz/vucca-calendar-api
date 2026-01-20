@@ -13,9 +13,15 @@ function must(name, condition) {
 
 const isProd = process.env.NODE_ENV === "production";
 
+const normalizeOrigin = (s = "") =>
+  String(s)
+    .trim()
+    .replace(/^['"]|['"]$/g, "")
+    .replace(/\/$/, "");
+
 const allowedOrigins = (process.env.CORS_ORIGINS || "http://localhost:5173")
   .split(",")
-  .map((s) => s.trim())
+  .map(normalizeOrigin)
   .filter(Boolean);
 
 // Validaciones mínimas
@@ -64,8 +70,9 @@ const authLimiter = rateLimit({
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (!origin) return cb(null, true); // server-to-server o curl
-      if (allowedOrigins.includes(origin)) return cb(null, true);
+      if (!origin) return cb(null, true);
+      const o = normalizeOrigin(origin);
+      if (allowedOrigins.includes(o)) return cb(null, true);
       return cb(new Error("Not allowed by CORS"));
     },
     credentials: true,
