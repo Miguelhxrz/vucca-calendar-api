@@ -7,16 +7,8 @@ const helmet = require("helmet");
 const morgan = require("morgan");
 const rateLimit = require("express-rate-limit");
 
-const authRoutes = require("./routes/auth");
-const umpiresRoutes = require("./routes/umpires");
-const calendarRoutes = require("./routes/assignments");
-const seasonsRoutes = require("./routes/seasons");
-const statsRoutes = require("./routes/stats");
-
 function must(name, condition) {
-  if (!condition) {
-    throw new Error(`[ENV] Falta o inválida: ${name}`);
-  }
+  if (!condition) throw new Error(`[ENV] Falta o inválida: ${name}`);
 }
 
 const isProd = process.env.NODE_ENV === "production";
@@ -26,15 +18,15 @@ const allowedOrigins = (process.env.CORS_ORIGINS || "http://localhost:5173")
   .map((s) => s.trim())
   .filter(Boolean);
 
-// Validaciones mínimas “anti-suicidio”
+// Validaciones mínimas
 must(
   "JWT_SECRET",
-  process.env.JWT_SECRET && process.env.JWT_SECRET.length >= 32
+  process.env.JWT_SECRET && process.env.JWT_SECRET.length >= 32,
 );
 must("ADMIN_KEY", process.env.ADMIN_KEY && process.env.ADMIN_KEY.length >= 8);
 must(
   "DATABASE_URL",
-  process.env.DATABASE_URL && process.env.DATABASE_URL.startsWith("mysql://")
+  process.env.DATABASE_URL && process.env.DATABASE_URL.startsWith("mysql://"),
 );
 
 const app = express();
@@ -53,21 +45,22 @@ app.use(cookieParser());
 // Rate limit global (suave)
 app.use(
   rateLimit({
-    windowMs: 60 * 1000, // 1 min
-    limit: 120, // 120 req/min por IP
+    windowMs: 60 * 1000,
+    limit: 120,
     standardHeaders: true,
     legacyHeaders: false,
-  })
+  }),
 );
 
 // Rate limit más fuerte SOLO para auth
 const authLimiter = rateLimit({
-  windowMs: 10 * 60 * 1000, // 10 min
-  limit: 25, // 25 intentos / 10 min
+  windowMs: 10 * 60 * 1000,
+  limit: 25,
   standardHeaders: true,
   legacyHeaders: false,
 });
 
+// CORS
 app.use(
   cors({
     origin: (origin, cb) => {
@@ -78,10 +71,10 @@ app.use(
     credentials: true,
     methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
-  })
+  }),
 );
 
-// Bloqueo extra para métodos “peligrosos” (evita CSRF básico por CORS mal config)
+// Bloqueo extra para métodos “peligrosos”
 const unsafe = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 app.use((req, res, next) => {
   if (!unsafe.has(req.method)) return next();
@@ -93,16 +86,29 @@ app.use((req, res, next) => {
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
+// ✅ Importa rutas soportando CommonJS o ESM (default)
+const reqd = (p) => {
+  const m = require(p);
+  return m.default ?? m;
+};
+
+const authRoutes = reqd("./routes/auth");
+const umpiresRoutes = reqd("./routes/umpires");
+const calendarRoutes = reqd("./routes/assignments");
+const seasonsRoutes = reqd("./routes/seasons");
+const statsRoutes = reqd("./routes/stats");
+
+// ✅ Monta rutas
 app.use("/auth", authLimiter, authRoutes);
 app.use("/umpires", umpiresRoutes);
-app.use("/calendar", require("./routes/assignments"));
+app.use("/calendar", calendarRoutes);
 app.use("/seasons", seasonsRoutes);
 app.use("/stats", statsRoutes);
 
 // BigInt safe
 app.set("json replacer", (_k, v) => (typeof v === "bigint" ? v.toString() : v));
 
-// Error handler (mejor para errores CORS/validaciones)
+// Error handler
 app.use((err, _req, res, _next) => {
   if (!isProd) console.error(err);
 
@@ -110,7 +116,7 @@ app.use((err, _req, res, _next) => {
     return res.status(403).json({ error: "CORS blocked" });
   }
 
-  res.status(500).json({ error: "Internal Server Error" });
+  return res.status(500).json({ error: "Internal Server Error" });
 });
 
 const port = process.env.PORT || 3000;
