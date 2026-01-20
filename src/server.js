@@ -70,10 +70,14 @@ const authLimiter = rateLimit({
 app.use(
   cors({
     origin: (origin, cb) => {
+      // requests sin origin (curl, server-to-server)
       if (!origin) return cb(null, true);
-      const o = normalizeOrigin(origin);
-      if (allowedOrigins.includes(o)) return cb(null, true);
-      return cb(new Error("Not allowed by CORS"));
+
+      // permite si está en la lista
+      if (allowedOrigins.includes(origin)) return cb(null, true);
+
+      // NO tires error aquí (mata el preflight)
+      return cb(null, false);
     },
     credentials: true,
     methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
