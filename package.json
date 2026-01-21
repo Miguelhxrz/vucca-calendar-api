@@ -4,6 +4,7 @@
   "main": "src/server.js",
   "scripts": {
     "postinstall": "prisma generate",
+    "prestart": "prisma migrate deploy",
     "build": "echo \"build ok\"",
     "start": "node src/server.js"
   },
