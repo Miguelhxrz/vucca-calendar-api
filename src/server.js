@@ -16,8 +16,8 @@ const isProd = process.env.NODE_ENV === "production";
 const normalizeOrigin = (s = "") =>
   String(s)
     .trim()
-    .replace(/^['"]|['"]$/g, "")
-    .replace(/\/$/, "");
+    .replace(/^['"]|['"]$/g, "") // quita comillas
+    .replace(/\/$/, ""); // quita / final
 
 const allowedOrigins = (process.env.CORS_ORIGINS || "http://localhost:5173")
   .split(",")
@@ -36,19 +36,16 @@ must(
 );
 
 const app = express();
-
-// Railway/Render/Vercel proxies
 app.set("trust proxy", 1);
 
 app.use(helmet());
 app.disable("x-powered-by");
-
 if (!isProd) app.use(morgan("dev"));
 
 app.use(express.json({ limit: process.env.JSON_LIMIT || "100kb" }));
 app.use(cookieParser());
 
-// Rate limit global (suave)
+// Rate limit global
 app.use(
   rateLimit({
     windowMs: 60 * 1000,
@@ -58,7 +55,7 @@ app.use(
   }),
 );
 
-// Rate limit más fuerte SOLO para auth
+// Rate limit auth
 const authLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
   limit: 25,
@@ -66,32 +63,42 @@ const authLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-// CORS
-app.use(
-  cors({
-    origin: (origin, cb) => {
-      // requests sin origin (curl, server-to-server)
-      if (!origin) return cb(null, true);
+// ✅ Usa las MISMAS opciones para CORS y preflight
+const corsOptions = {
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true);
 
-      // permite si está en la lista
-      if (allowedOrigins.includes(origin)) return cb(null, true);
+    const o = normalizeOrigin(origin);
+    if (allowedOrigins.includes(o)) return cb(null, true);
 
-      // NO tires error aquí (mata el preflight)
-      return cb(null, false);
-    },
-    credentials: true,
-    methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  }),
-);
+    return cb(new Error("Not allowed by CORS"));
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  optionsSuccessStatus: 204,
+};
+
+// CORS principal
+app.use(cors(corsOptions));
+
+// ✅ Preflight global con la misma config
+app.options("*", cors(corsOptions));
 
 // Bloqueo extra para métodos “peligrosos”
 const unsafe = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 app.use((req, res, next) => {
+  // ✅ Nunca bloquees OPTIONS (preflight)
+  if (req.method === "OPTIONS") return next();
+
   if (!unsafe.has(req.method)) return next();
+
   const origin = req.headers.origin;
   if (!origin) return next();
-  if (allowedOrigins.includes(origin)) return next();
+
+  const o = normalizeOrigin(origin);
+  if (allowedOrigins.includes(o)) return next();
+
   return res.status(403).json({ error: "Forbidden" });
 });
 
