@@ -119,7 +119,13 @@ const statsRoutes = reqd("./routes/stats");
 // ✅ Monta rutas
 app.use("/auth", authLimiter, authRoutes);
 app.use("/umpires", umpiresRoutes);
+
+// Ruta original
 app.use("/calendar", calendarRoutes);
+
+// ✅ Alias para que el front que usa /assignments no falle
+app.use("/assignments", calendarRoutes);
+
 app.use("/seasons", seasonsRoutes);
 app.use("/stats", statsRoutes);
 

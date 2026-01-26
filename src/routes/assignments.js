@@ -71,9 +71,113 @@ const normalizeUmpiresPayload = (raw) => {
   return out;
 };
 
+// ✅ construye un Map(id -> {gameNumber, gameNumber2}) calculado de forma estable
+function buildGameNumberMap(allSeasonItems = []) {
+  const sorted = [...allSeasonItems].sort((a, b) => {
+    const wnA = Number(a.weekNumber ?? 0);
+    const wnB = Number(b.weekNumber ?? 0);
+    if (wnA !== wnB) return wnA - wnB;
+
+    const rA = Number(a.rowIndex ?? 0);
+    const rB = Number(b.rowIndex ?? 0);
+    if (rA !== rB) return rA - rB;
+
+    const cA = Number(a.colIndex ?? 0);
+    const cB = Number(b.colIndex ?? 0);
+    if (cA !== cB) return cA - cB;
+
+    const cellA = Number(a.cellIndex ?? 0);
+    const cellB = Number(b.cellIndex ?? 0);
+    return cellA - cellB;
+  });
+
+  const map = new Map();
+  let counter = 1;
+
+  for (const it of sorted) {
+    const id = it?.id;
+    if (!id) continue;
+
+    const hasTeams = !!(it.localTeam && it.visitorsTeam);
+
+    const status = (it.gameStatus || "").toString().trim().toLowerCase();
+    const isNoGame =
+      status === "no game" || status === "nogame" || status === "no_game";
+
+    if (!hasTeams || isNoGame) {
+      map.set(id, { gameNumber: null, gameNumber2: null });
+      continue;
+    }
+
+    const g1 = String(counter);
+    counter += 1;
+
+    let g2 = null;
+    if (it.isDoubleGame) {
+      g2 = String(counter);
+      counter += 1;
+    }
+
+    map.set(id, { gameNumber: g1, gameNumber2: g2 });
+  }
+
+  return map;
+}
+
+// ✅ Recalcula y GUARDA gameNumber/gameNumber2 en BD para toda la temporada.
+async function recomputeAndPersistGameNumbers(tx, seasonId) {
+  // 🔒 Lock de Season para evitar colisiones si se guardan 2 celdas al mismo tiempo.
+  try {
+    await tx.$queryRaw`SELECT id FROM Season WHERE id = ${seasonId} FOR UPDATE`;
+  } catch {
+    // si falla el lock, seguimos (mejor que romper guardado)
+  }
+
+  const allSeasonItems = await tx.assignment.findMany({
+    where: { seasonId },
+    orderBy: [
+      { weekNumber: "asc" },
+      { rowIndex: "asc" },
+      { colIndex: "asc" },
+      { cellIndex: "asc" },
+    ],
+    select: {
+      id: true,
+      weekNumber: true,
+      rowIndex: true,
+      colIndex: true,
+      cellIndex: true,
+      localTeam: true,
+      visitorsTeam: true,
+      gameStatus: true,
+      isDoubleGame: true,
+    },
+  });
+
+  const gameMap = buildGameNumberMap(allSeasonItems);
+
+  const updates = [];
+  for (const it of allSeasonItems) {
+    const calc = gameMap.get(it.id) || { gameNumber: null, gameNumber2: null };
+
+    updates.push(
+      tx.assignment.update({
+        where: { id: it.id },
+        data: {
+          gameNumber: calc.gameNumber,
+          gameNumber2: calc.gameNumber2,
+        },
+      }),
+    );
+  }
+
+  await Promise.all(updates);
+  return gameMap;
+}
+
 /* ===========================================================
  *  LISTAR ASIGNACIONES
- *  GET /assignments?seasonId=1&week=1&status=...&city=...&q=...
+ *  GET /calendar?seasonId=1&week=1&status=...&city=...&q=...
  * ===========================================================
  */
 
@@ -89,6 +193,20 @@ router.get("/", async (req, res) => {
       return res.status(400).json({ error: "seasonId requerido" });
     }
 
+    // Traemos TODO lo de la temporada para numerar globalmente
+    const allSeasonItems = await prisma.assignment.findMany({
+      where: { seasonId },
+      orderBy: [
+        { weekNumber: "asc" },
+        { rowIndex: "asc" },
+        { colIndex: "asc" },
+        { cellIndex: "asc" },
+      ],
+    });
+
+    const gameMap = buildGameNumberMap(allSeasonItems);
+
+    // Aplicamos filtros para la respuesta (sin romper numeración)
     const where = { seasonId };
     if (Number.isFinite(week) && week > 0) where.weekNumber = week;
     if (status) where.gameStatus = status;
@@ -109,10 +227,21 @@ router.get("/", async (req, res) => {
         { weekNumber: "asc" },
         { rowIndex: "asc" },
         { colIndex: "asc" },
+        { cellIndex: "asc" },
       ],
     });
 
-    res.json({ items });
+    // Inyectamos gameNumber/gameNumber2 calculados (coincide con lo persistido)
+    const withNumbers = items.map((a) => {
+      const calc = gameMap.get(a.id) || null;
+      return {
+        ...a,
+        gameNumber: calc?.gameNumber ?? null,
+        gameNumber2: calc?.gameNumber2 ?? null,
+      };
+    });
+
+    res.json({ items: withNumbers });
   } catch (err) {
     console.error("GET /assignments", err);
     res.status(500).json({ error: "Server error on /assignments" });
@@ -121,7 +250,7 @@ router.get("/", async (req, res) => {
 
 /* ===========================================================
  *  UPSERT + ACTUALIZAR totalWeeks
- *  POST /assignments/upsert
+ *  POST /calendar/upsert
  * ===========================================================
  */
 
@@ -140,8 +269,7 @@ router.post("/upsert", adminRequired, async (req, res) => {
       stadiumName,
       localTeam,
       visitorsTeam,
-      gameNumber,
-      gameNumber2,
+      // gameNumber/gameNumber2 se ignoran: ahora los calcula y GUARDA el backend
       gameTime,
       gameTime2,
       gameStatus,
@@ -160,17 +288,14 @@ router.post("/upsert", adminRequired, async (req, res) => {
         .json({ error: "seasonId, weekNumber y cellIndex son requeridos" });
     }
 
-    // ✅ NORMALIZAMOS SIEMPRE lo que venga
     const normalizedUmpires = normalizeUmpiresPayload(umpires);
 
-    // 🔎 LOG opcional (déjalo mientras depuramos LR)
-    // Si LR viene sin umpireId, lo vas a ver clarito acá:
     const lrId = Number(normalizedUmpires?.LR?.umpireId || 0);
     if (!lrId) {
       console.log(
         `[ASSIGNMENTS upsert] LR vacío -> season=${seasonId} week=${weekNumber} cell=${cellIndex}`,
         "rawLR=",
-        normalizedUmpires?.LR
+        normalizedUmpires?.LR,
       );
     }
 
@@ -187,47 +312,66 @@ router.post("/upsert", adminRequired, async (req, res) => {
       stadiumName: stadiumName || "",
       localTeam: localTeam || "",
       visitorsTeam: visitorsTeam || "",
-      gameNumber: gameNumber || null,
-      gameNumber2: gameNumber2 || null,
+
+      // ✅ lo calcula y lo guarda el backend
+      gameNumber: null,
+      gameNumber2: null,
+
       gameTime: gameTime || null,
       gameTime2: gameTime2 || null,
       gameStatus: gameStatus || "game",
       isDoubleGame: !!isDoubleGame,
       isFinalGame: !!isFinalGame,
 
-      // ✅ aquí está el fix real para que LR se guarde si viene
       umpires: normalizedUmpires,
     };
 
-    const saved = await prisma.assignment.upsert({
-      where: {
-        seasonId_weekNumber_cellIndex: { seasonId, weekNumber, cellIndex },
-      },
-      update: data,
-      create: data,
-    });
-
-    // Actualizar totalWeeks en Season (según la semana más alta usada)
-    try {
-      const season = await prisma.season.findUnique({
-        where: { id: seasonId },
-        select: { totalWeeks: true },
+    const result = await prisma.$transaction(async (tx) => {
+      const saved = await tx.assignment.upsert({
+        where: {
+          seasonId_weekNumber_cellIndex: { seasonId, weekNumber, cellIndex },
+        },
+        update: data,
+        create: data,
       });
 
-      const currentTotal = season?.totalWeeks ?? 1;
-      const nextTotal = weekNumber > currentTotal ? weekNumber : currentTotal;
-
-      if (nextTotal !== currentTotal) {
-        await prisma.season.update({
+      // actualizar totalWeeks
+      try {
+        const season = await tx.season.findUnique({
           where: { id: seasonId },
-          data: { totalWeeks: nextTotal },
+          select: { totalWeeks: true },
         });
-      }
-    } catch (e) {
-      console.error("Error actualizando totalWeeks en Season:", e);
-    }
 
-    res.json({ ok: true, assignment: saved });
+        const currentTotal = season?.totalWeeks ?? 1;
+        const nextTotal = weekNumber > currentTotal ? weekNumber : currentTotal;
+
+        if (nextTotal !== currentTotal) {
+          await tx.season.update({
+            where: { id: seasonId },
+            data: { totalWeeks: nextTotal },
+          });
+        }
+      } catch (e) {
+        console.error("Error actualizando totalWeeks en Season:", e);
+      }
+
+      // ✅ recalcular y PERSISTIR números para TODA la temporada
+      const gameMap = await recomputeAndPersistGameNumbers(tx, seasonId);
+      const calc = gameMap.get(saved.id) || {
+        gameNumber: null,
+        gameNumber2: null,
+      };
+
+      return {
+        saved: {
+          ...saved,
+          gameNumber: calc.gameNumber,
+          gameNumber2: calc.gameNumber2,
+        },
+      };
+    });
+
+    res.json({ ok: true, assignment: result.saved });
   } catch (err) {
     console.error("POST /assignments/upsert", err);
     res.status(500).json({ error: "Server error on /assignments/upsert" });
@@ -235,8 +379,32 @@ router.post("/upsert", adminRequired, async (req, res) => {
 });
 
 /* ===========================================================
+ *  RECALCULAR Y PERSISTIR NÚMEROS DE JUEGO (ONE-SHOT)
+ *  POST /calendar/recompute-numbers
+ * ===========================================================
+ */
+
+router.post("/recompute-numbers", adminRequired, async (req, res) => {
+  try {
+    const seasonId = Number(req.body?.seasonId || req.body?.id);
+    if (!Number.isFinite(seasonId)) {
+      return res.status(400).json({ error: "seasonId requerido" });
+    }
+
+    await prisma.$transaction(async (tx) => {
+      await recomputeAndPersistGameNumbers(tx, seasonId);
+    });
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("POST /assignments/recompute-numbers", err);
+    return res.status(500).json({ error: "No se pudo recalcular" });
+  }
+});
+
+/* ===========================================================
  *  FINALIZAR TEMPORADA
- *  POST /assignments/finish
+ *  POST /calendar/finish
  * ===========================================================
  */
 
@@ -271,8 +439,18 @@ router.delete("/:id", adminRequired, async (req, res) => {
       return res.status(400).json({ error: "ID inválido" });
     }
 
-    await prisma.assignment.delete({
-      where: { id },
+    // ✅ borrado + renumeración en transacción
+    await prisma.$transaction(async (tx) => {
+      const current = await tx.assignment.findUnique({
+        where: { id },
+        select: { seasonId: true },
+      });
+
+      await tx.assignment.delete({ where: { id } });
+
+      if (current?.seasonId) {
+        await recomputeAndPersistGameNumbers(tx, current.seasonId);
+      }
     });
 
     return res.json({ ok: true });
