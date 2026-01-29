@@ -248,6 +248,57 @@ router.get("/", async (req, res) => {
   }
 });
 
+// ===========================================================
+// NEXT GAME NUMBER (preview)
+// GET /calendar/next-number?seasonId=1&isDoubleGame=0|1
+// (si tienes alias /assignments, también sirve)
+// ===========================================================
+router.get("/next-number", adminRequired, async (req, res) => {
+  try {
+    const seasonId = Number(req.query.seasonId || req.query.id);
+    const isDoubleGame =
+      req.query.isDoubleGame === "1" || req.query.isDoubleGame === "true";
+
+    if (!Number.isFinite(seasonId)) {
+      return res.status(400).json({ error: "seasonId requerido" });
+    }
+
+    const allSeasonItems = await prisma.assignment.findMany({
+      where: { seasonId },
+      select: {
+        localTeam: true,
+        visitorsTeam: true,
+        gameStatus: true,
+        isDoubleGame: true,
+      },
+    });
+
+    const normStatus = (s) => (s || "").toString().trim().toLowerCase();
+    const isNoGame = (status) => {
+      const v = normStatus(status);
+      return v === "no game" || v === "nogame" || v === "no_game";
+    };
+
+    // Cuenta juegos "válidos" ya existentes en la temporada
+    let count = 0;
+    for (const it of allSeasonItems) {
+      const hasTeams = !!(it.localTeam && it.visitorsTeam);
+      if (!hasTeams || isNoGame(it.gameStatus)) continue;
+
+      count += 1;
+      if (it.isDoubleGame) count += 1;
+    }
+
+    const next1 = String(count + 1);
+    const next2 = isDoubleGame ? String(count + 2) : null;
+
+    return res.json({ nextGameNumber: next1, nextGameNumber2: next2 });
+  } catch (err) {
+    console.error("GET /assignments/next-number", err);
+    return res.status(500).json({ error: "No se pudo calcular next number" });
+  }
+});
+
 /* ===========================================================
  *  UPSERT + ACTUALIZAR totalWeeks
  *  POST /calendar/upsert
