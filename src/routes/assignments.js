@@ -5,313 +5,220 @@ import { adminRequired } from "../middleware/auth.js";
 
 const router = Router();
 
-/* ===========================================================
- *  HELPERS
- * ===========================================================
- */
-
-const normalizeUmpiresPayload = (raw) => {
-  if (!raw) return {};
-
-  let u = raw;
-
-  // si viene como string JSON
-  if (typeof u === "string") {
-    try {
-      u = JSON.parse(u);
-    } catch {
-      return {};
-    }
-  }
-
-  if (typeof u !== "object" || Array.isArray(u)) return {};
-
-  const POSITIONS = ["H", "R", "1B", "2B", "3B", "LF", "LR", "OR"];
-
-  const getSlotId = (slot) => {
-    if (!slot) return null;
-
-    // si viene como número
-    if (typeof slot === "number") {
-      return Number.isFinite(slot) && slot > 0 ? slot : null;
-    }
-
-    // si viene como string numérico
-    if (typeof slot === "string") {
-      const n = Number(slot);
-      return Number.isFinite(n) && n > 0 ? n : null;
-    }
-
-    // si viene como objeto
-    const rawId = slot.umpireId ?? slot.umpire_id ?? slot.id ?? slot.ID ?? null;
-
-    const n = Number(rawId);
-    return Number.isFinite(n) && n > 0 ? n : null;
-  };
-
-  const normalizeSlot = (slot) => {
-    // siempre devolvemos un objeto consistente
-    const id = getSlotId(slot);
-
-    // preservamos name/double si existen, pero jamás confiamos en "0"
-    const base =
-      slot && typeof slot === "object" && !Array.isArray(slot) ? slot : {};
-
-    return {
-      ...base,
-      umpireId: id, // <- CLAVE: null si no hay id válido
-      name: base.name ?? "",
-      double: base.double ?? "",
-    };
-  };
-
-  const out = {};
-  for (const p of POSITIONS) out[p] = normalizeSlot(u[p]);
-
-  return out;
+const toInt = (v) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
 };
 
-// ✅ construye un Map(id -> {gameNumber, gameNumber2}) calculado de forma estable
-function buildGameNumberMap(allSeasonItems = []) {
-  const sorted = [...allSeasonItems].sort((a, b) => {
-    const wnA = Number(a.weekNumber ?? 0);
-    const wnB = Number(b.weekNumber ?? 0);
-    if (wnA !== wnB) return wnA - wnB;
+const toBool = (v) => {
+  if (typeof v === "boolean") return v;
+  const s = String(v ?? "")
+    .toLowerCase()
+    .trim();
+  return s === "1" || s === "true" || s === "yes";
+};
 
-    const rA = Number(a.rowIndex ?? 0);
-    const rB = Number(b.rowIndex ?? 0);
-    if (rA !== rB) return rA - rB;
+const normStr = (v) => (v == null ? "" : String(v));
 
-    const cA = Number(a.colIndex ?? 0);
-    const cB = Number(b.colIndex ?? 0);
-    if (cA !== cB) return cA - cB;
+const numFromGame = (s) => {
+  // gameNumber viene como String? (ej: "12")
+  const n = Number(String(s ?? "").trim());
+  return Number.isFinite(n) ? n : null;
+};
 
-    const cellA = Number(a.cellIndex ?? 0);
-    const cellB = Number(b.cellIndex ?? 0);
-    return cellA - cellB;
-  });
-
-  const map = new Map();
-  let counter = 1;
-
-  for (const it of sorted) {
-    const id = it?.id;
-    if (!id) continue;
-
-    const hasTeams = !!(it.localTeam && it.visitorsTeam);
-
-    const status = (it.gameStatus || "").toString().trim().toLowerCase();
-    const isNoGame =
-      status === "no game" || status === "nogame" || status === "no_game";
-
-    if (!hasTeams || isNoGame) {
-      map.set(id, { gameNumber: null, gameNumber2: null });
-      continue;
-    }
-
-    const g1 = String(counter);
-    counter += 1;
-
-    let g2 = null;
-    if (it.isDoubleGame) {
-      g2 = String(counter);
-      counter += 1;
-    }
-
-    map.set(id, { gameNumber: g1, gameNumber2: g2 });
-  }
-
-  return map;
-}
-
-// ✅ Recalcula y GUARDA gameNumber/gameNumber2 en BD para toda la temporada.
-async function recomputeAndPersistGameNumbers(tx, seasonId) {
-  // 🔒 Lock de Season para evitar colisiones si se guardan 2 celdas al mismo tiempo.
-  try {
-    await tx.$queryRaw`SELECT id FROM Season WHERE id = ${seasonId} FOR UPDATE`;
-  } catch {
-    // si falla el lock, seguimos (mejor que romper guardado)
-  }
-
-  const allSeasonItems = await tx.assignment.findMany({
+async function getSeasonMaxGameNumber(seasonId) {
+  const rows = await prisma.assignment.findMany({
     where: { seasonId },
-    orderBy: [
-      { weekNumber: "asc" },
-      { rowIndex: "asc" },
-      { colIndex: "asc" },
-      { cellIndex: "asc" },
-    ],
-    select: {
-      id: true,
-      weekNumber: true,
-      rowIndex: true,
-      colIndex: true,
-      cellIndex: true,
-      localTeam: true,
-      visitorsTeam: true,
-      gameStatus: true,
-      isDoubleGame: true,
-    },
+    select: { gameNumber: true, gameNumber2: true },
   });
 
-  const gameMap = buildGameNumberMap(allSeasonItems);
+  let max = 0;
 
-  const updates = [];
-  for (const it of allSeasonItems) {
-    const calc = gameMap.get(it.id) || { gameNumber: null, gameNumber2: null };
-
-    updates.push(
-      tx.assignment.update({
-        where: { id: it.id },
-        data: {
-          gameNumber: calc.gameNumber,
-          gameNumber2: calc.gameNumber2,
-        },
-      }),
-    );
+  for (const r of rows) {
+    const n1 = numFromGame(r.gameNumber);
+    const n2 = numFromGame(r.gameNumber2);
+    if (n1 != null && n1 > max) max = n1;
+    if (n2 != null && n2 > max) max = n2;
   }
 
-  await Promise.all(updates);
-  return gameMap;
+  return max;
 }
 
-/* ===========================================================
- *  LISTAR ASIGNACIONES
- *  GET /calendar?seasonId=1&week=1&status=...&city=...&q=...
- * ===========================================================
+async function gameNumberExists(seasonId, gameStr) {
+  if (!gameStr) return false;
+
+  const found = await prisma.assignment.findFirst({
+    where: {
+      seasonId,
+      OR: [{ gameNumber: gameStr }, { gameNumber2: gameStr }],
+    },
+    select: { id: true },
+  });
+
+  return !!found;
+}
+
+async function getNextNumbers(seasonId, isDoubleGame) {
+  const max = await getSeasonMaxGameNumber(seasonId);
+  const next1 = String(max + 1);
+  const next2 = isDoubleGame ? String(max + 2) : null;
+  return { next1, next2 };
+}
+
+/**
+ * GET /assignments?seasonId=1&week=1
+ * (tu front usa esto)
  */
-
-router.get("/", async (req, res) => {
+router.get("/", adminRequired, async (req, res) => {
   try {
-    const seasonId = Number(req.query.seasonId || req.query.id);
-    const week = req.query.week ? Number(req.query.week) : null;
-    const status = req.query.status || null;
-    const city = req.query.city || null;
-    const q = (req.query.q || "").trim().toLowerCase();
+    const seasonId = toInt(req.query.seasonId);
+    const week = toInt(req.query.week);
 
-    if (!Number.isFinite(seasonId)) {
-      return res.status(400).json({ error: "seasonId requerido" });
-    }
-
-    // Traemos TODO lo de la temporada para numerar globalmente
-    const allSeasonItems = await prisma.assignment.findMany({
-      where: { seasonId },
-      orderBy: [
-        { weekNumber: "asc" },
-        { rowIndex: "asc" },
-        { colIndex: "asc" },
-        { cellIndex: "asc" },
-      ],
-    });
-
-    const gameMap = buildGameNumberMap(allSeasonItems);
-
-    // Aplicamos filtros para la respuesta (sin romper numeración)
-    const where = { seasonId };
-    if (Number.isFinite(week) && week > 0) where.weekNumber = week;
-    if (status) where.gameStatus = status;
-    if (city) where.stadiumCity = city;
-    if (q) {
-      where.OR = [
-        { localTeam: { contains: q, mode: "insensitive" } },
-        { visitorsTeam: { contains: q, mode: "insensitive" } },
-        { stadiumName: { contains: q, mode: "insensitive" } },
-        { stadiumCity: { contains: q, mode: "insensitive" } },
-        { dayName: { contains: q, mode: "insensitive" } },
-      ];
-    }
+    const where = {};
+    if (seasonId != null) where.seasonId = seasonId;
+    if (week != null) where.weekNumber = week;
 
     const items = await prisma.assignment.findMany({
-      where,
-      orderBy: [
-        { weekNumber: "asc" },
-        { rowIndex: "asc" },
-        { colIndex: "asc" },
-        { cellIndex: "asc" },
-      ],
+      where: Object.keys(where).length ? where : undefined,
+      orderBy: [{ weekNumber: "asc" }, { cellIndex: "asc" }],
     });
 
-    // Inyectamos gameNumber/gameNumber2 calculados (coincide con lo persistido)
-    const withNumbers = items.map((a) => {
-      const calc = gameMap.get(a.id) || null;
-      return {
-        ...a,
-        gameNumber: calc?.gameNumber ?? null,
-        gameNumber2: calc?.gameNumber2 ?? null,
-      };
-    });
-
-    res.json({ items: withNumbers });
+    return res.json({ items });
   } catch (err) {
-    console.error("GET /assignments", err);
-    res.status(500).json({ error: "Server error on /assignments" });
+    console.error("GET /assignments error:", err);
+    return res.status(500).json({ error: "Error obteniendo asignaciones." });
   }
 });
 
-// ===========================================================
-// NEXT GAME NUMBER (preview)
-// GET /calendar/next-number?seasonId=1&isDoubleGame=0|1
-// (si tienes alias /assignments, también sirve)
-// ===========================================================
+/**
+ * Preview: GET /calendar/next-number?seasonId=1&isDoubleGame=0|1
+ * (tu front lo llama así, y está bien)
+ */
 router.get("/next-number", adminRequired, async (req, res) => {
   try {
-    const seasonId = Number(req.query.seasonId || req.query.id);
-    const isDoubleGame =
-      req.query.isDoubleGame === "1" || req.query.isDoubleGame === "true";
-
-    if (!Number.isFinite(seasonId)) {
-      return res.status(400).json({ error: "seasonId requerido" });
+    const seasonId = toInt(req.query.seasonId);
+    if (!seasonId) {
+      return res.status(400).json({ error: "seasonId es requerido" });
     }
 
-    const allSeasonItems = await prisma.assignment.findMany({
-      where: { seasonId },
-      select: {
-        localTeam: true,
-        visitorsTeam: true,
-        gameStatus: true,
-        isDoubleGame: true,
+    const isDoubleGame = toBool(req.query.isDoubleGame);
+
+    const { next1, next2 } = await getNextNumbers(seasonId, isDoubleGame);
+
+    return res.json({
+      nextGameNumber: next1,
+      nextGameNumber2: next2 ?? "",
+      isDoubleGame,
+    });
+  } catch (err) {
+    console.error("GET /calendar/next-number error:", err);
+    return res.status(500).json({ error: "Error calculando next-number." });
+  }
+});
+
+/**
+ * POST /assignments/upsert
+ * IMPORTANTÍSIMO:
+ * - Si es NUEVO -> backend asigna gameNumber/gameNumber2 y los guarda.
+ * - Si es UPDATE -> conserva gameNumber, y solo asigna gameNumber2 si se activó doble y está vacío.
+ * - IGNORA lo que mande el front en gameNumber (el front lo usa solo de preview).
+ */
+router.post("/upsert", adminRequired, async (req, res) => {
+  try {
+    const body = req.body || {};
+
+    const seasonId = toInt(body.seasonId);
+    const weekNumber = toInt(body.weekNumber);
+    const cellIndex = toInt(body.cellIndex);
+
+    if (!seasonId || !weekNumber || cellIndex == null) {
+      return res.status(400).json({
+        error: "Faltan campos requeridos: seasonId, weekNumber, cellIndex",
+      });
+    }
+
+    // Validaciones básicas
+    const rowIndex = toInt(body.rowIndex) ?? 0;
+    const colIndex = toInt(body.colIndex) ?? 0;
+
+    const league = normStr(body.league).trim();
+    const dayName = normStr(body.dayName).trim();
+    const dateStr = normStr(body.dateStr).trim();
+    const stadiumCity = normStr(body.stadiumCity).trim();
+    const stadiumName = normStr(body.stadiumName).trim();
+    const localTeam = normStr(body.localTeam).trim();
+    const visitorsTeam = normStr(body.visitorsTeam).trim();
+
+    const gameTime =
+      body.gameTime != null ? normStr(body.gameTime).trim() : null;
+    const gameTime2 =
+      body.gameTime2 != null ? normStr(body.gameTime2).trim() : null;
+
+    const gameStatus = normStr(
+      body.gameStatus || body.game_status || "game",
+    ).trim();
+
+    const isDoubleGame = !!body.isDoubleGame;
+    const isFinalGame = !!body.isFinalGame;
+
+    const umpires = body.umpires ?? {};
+
+    // si viene id, intentamos update por id
+    const id = toInt(body.id);
+
+    // Detectar si existe por unique compuesto (por si no trae id)
+    const existingByKey = await prisma.assignment.findUnique({
+      where: {
+        seasonId_weekNumber_cellIndex: {
+          seasonId,
+          weekNumber,
+          cellIndex,
+        },
       },
     });
 
-    const normStatus = (s) => (s || "").toString().trim().toLowerCase();
-    const isNoGame = (status) => {
-      const v = normStatus(status);
-      return v === "no game" || v === "nogame" || v === "no_game";
-    };
+    const isNew = !id && !existingByKey;
 
-    // Cuenta juegos "válidos" ya existentes en la temporada
-    let count = 0;
-    for (const it of allSeasonItems) {
-      const hasTeams = !!(it.localTeam && it.visitorsTeam);
-      if (!hasTeams || isNoGame(it.gameStatus)) continue;
+    let gameNumberToSave = existingByKey?.gameNumber ?? null;
+    let gameNumber2ToSave = existingByKey?.gameNumber2 ?? null;
 
-      count += 1;
-      if (it.isDoubleGame) count += 1;
+    if (isNew) {
+      // NUEVO: asigna siempre (ignora lo del front)
+      const { next1, next2 } = await getNextNumbers(seasonId, isDoubleGame);
+      gameNumberToSave = next1;
+      gameNumber2ToSave = isDoubleGame ? next2 : null;
+    } else {
+      // UPDATE:
+      // - conserva gameNumber
+      // - si ahora es doble y no hay gameNumber2: intenta usar gameNumber+1 si está libre, si no, usa next
+      if (isDoubleGame) {
+        if (!gameNumber2ToSave) {
+          const n1 = numFromGame(gameNumberToSave);
+          if (n1 != null) {
+            const candidate = String(n1 + 1);
+            const exists = await gameNumberExists(seasonId, candidate);
+            if (!exists) {
+              gameNumber2ToSave = candidate;
+            } else {
+              const { next2 } = await getNextNumbers(seasonId, true);
+              gameNumber2ToSave = next2;
+            }
+          } else {
+            const { next2 } = await getNextNumbers(seasonId, true);
+            gameNumber2ToSave = next2;
+          }
+        }
+      } else {
+        // si ya no es doble, limpiamos el 2
+        gameNumber2ToSave = null;
+      }
     }
 
-    const next1 = String(count + 1);
-    const next2 = isDoubleGame ? String(count + 2) : null;
-
-    return res.json({ nextGameNumber: next1, nextGameNumber2: next2 });
-  } catch (err) {
-    console.error("GET /assignments/next-number", err);
-    return res.status(500).json({ error: "No se pudo calcular next number" });
-  }
-});
-
-/* ===========================================================
- *  UPSERT + ACTUALIZAR totalWeeks
- *  POST /calendar/upsert
- * ===========================================================
- */
-
-router.post("/upsert", adminRequired, async (req, res) => {
-  try {
-    const {
+    const data = {
       seasonId,
+      league,
       weekNumber,
       cellIndex,
-      league,
       rowIndex,
       colIndex,
       dayName,
@@ -320,194 +227,78 @@ router.post("/upsert", adminRequired, async (req, res) => {
       stadiumName,
       localTeam,
       visitorsTeam,
-      // gameNumber/gameNumber2 se ignoran: ahora los calcula y GUARDA el backend
+
+      gameNumber: gameNumberToSave,
+      gameNumber2: gameNumber2ToSave,
+
       gameTime,
-      gameTime2,
+      gameTime2: isDoubleGame ? gameTime2 : null,
+
       gameStatus,
       isDoubleGame,
       isFinalGame,
+
       umpires,
-    } = req.body || {};
-
-    if (
-      !Number.isFinite(seasonId) ||
-      !Number.isFinite(weekNumber) ||
-      !Number.isFinite(cellIndex)
-    ) {
-      return res
-        .status(400)
-        .json({ error: "seasonId, weekNumber y cellIndex son requeridos" });
-    }
-
-    const normalizedUmpires = normalizeUmpiresPayload(umpires);
-
-    const lrId = Number(normalizedUmpires?.LR?.umpireId || 0);
-    if (!lrId) {
-      console.log(
-        `[ASSIGNMENTS upsert] LR vacío -> season=${seasonId} week=${weekNumber} cell=${cellIndex}`,
-        "rawLR=",
-        normalizedUmpires?.LR,
-      );
-    }
-
-    const data = {
-      seasonId,
-      weekNumber,
-      cellIndex,
-      league: league || null,
-      rowIndex: rowIndex ?? 0,
-      colIndex: colIndex ?? 0,
-      dayName: dayName || "",
-      dateStr: dateStr || "",
-      stadiumCity: stadiumCity || "",
-      stadiumName: stadiumName || "",
-      localTeam: localTeam || "",
-      visitorsTeam: visitorsTeam || "",
-
-      // ✅ lo calcula y lo guarda el backend
-      gameNumber: null,
-      gameNumber2: null,
-
-      gameTime: gameTime || null,
-      gameTime2: gameTime2 || null,
-      gameStatus: gameStatus || "game",
-      isDoubleGame: !!isDoubleGame,
-      isFinalGame: !!isFinalGame,
-
-      umpires: normalizedUmpires,
     };
 
-    const result = await prisma.$transaction(async (tx) => {
-      const saved = await tx.assignment.upsert({
-        where: {
-          seasonId_weekNumber_cellIndex: { seasonId, weekNumber, cellIndex },
-        },
-        update: data,
-        create: data,
+    let saved;
+
+    if (id) {
+      // UPDATE por id
+      saved = await prisma.assignment.update({
+        where: { id },
+        data,
       });
-
-      // actualizar totalWeeks
-      try {
-        const season = await tx.season.findUnique({
-          where: { id: seasonId },
-          select: { totalWeeks: true },
-        });
-
-        const currentTotal = season?.totalWeeks ?? 1;
-        const nextTotal = weekNumber > currentTotal ? weekNumber : currentTotal;
-
-        if (nextTotal !== currentTotal) {
-          await tx.season.update({
-            where: { id: seasonId },
-            data: { totalWeeks: nextTotal },
-          });
-        }
-      } catch (e) {
-        console.error("Error actualizando totalWeeks en Season:", e);
-      }
-
-      // ✅ recalcular y PERSISTIR números para TODA la temporada
-      const gameMap = await recomputeAndPersistGameNumbers(tx, seasonId);
-      const calc = gameMap.get(saved.id) || {
-        gameNumber: null,
-        gameNumber2: null,
-      };
-
-      return {
-        saved: {
-          ...saved,
-          gameNumber: calc.gameNumber,
-          gameNumber2: calc.gameNumber2,
+    } else {
+      // UPSERT por llave única compuesta
+      saved = await prisma.assignment.upsert({
+        where: {
+          seasonId_weekNumber_cellIndex: {
+            seasonId,
+            weekNumber,
+            cellIndex,
+          },
         },
-      };
-    });
-
-    res.json({ ok: true, assignment: result.saved });
-  } catch (err) {
-    console.error("POST /assignments/upsert", err);
-    res.status(500).json({ error: "Server error on /assignments/upsert" });
-  }
-});
-
-/* ===========================================================
- *  RECALCULAR Y PERSISTIR NÚMEROS DE JUEGO (ONE-SHOT)
- *  POST /calendar/recompute-numbers
- * ===========================================================
- */
-
-router.post("/recompute-numbers", adminRequired, async (req, res) => {
-  try {
-    const seasonId = Number(req.body?.seasonId || req.body?.id);
-    if (!Number.isFinite(seasonId)) {
-      return res.status(400).json({ error: "seasonId requerido" });
+        create: data,
+        update: data,
+      });
     }
 
-    await prisma.$transaction(async (tx) => {
-      await recomputeAndPersistGameNumbers(tx, seasonId);
-    });
-
-    return res.json({ ok: true });
+    return res.json({ assignment: saved });
   } catch (err) {
-    console.error("POST /assignments/recompute-numbers", err);
-    return res.status(500).json({ error: "No se pudo recalcular" });
-  }
-});
+    console.error("POST /assignments/upsert error:", err);
 
-/* ===========================================================
- *  FINALIZAR TEMPORADA
- *  POST /calendar/finish
- * ===========================================================
- */
-
-router.post("/finish", adminRequired, async (req, res) => {
-  try {
-    const { seasonId, totalWeeks } = req.body;
-    if (!Number.isFinite(seasonId)) {
-      return res.status(400).json({ error: "seasonId requerido" });
+    // Unique constraint friendly message
+    const msg = String(err?.message || "");
+    if (
+      msg.includes("Unique constraint") ||
+      msg.includes("seasonId_weekNumber_cellIndex")
+    ) {
+      return res
+        .status(409)
+        .json({ error: "Ya existe una asignación para esa celda." });
     }
 
-    await prisma.season.update({
-      where: { id: seasonId },
-      data: {
-        status: "FINISHED",
-        ...(Number.isFinite(totalWeeks) && totalWeeks > 0
-          ? { totalWeeks }
-          : {}),
-      },
-    });
-
-    res.json({ ok: true });
-  } catch (e) {
-    console.error("POST /assignments/finish", e);
-    res.status(500).json({ error: "Error al finalizar la temporada" });
+    return res.status(500).json({ error: "Error guardando asignación." });
   }
 });
 
+/**
+ * DELETE /assignments/:id
+ * (tu front lo usa con api.del)
+ */
 router.delete("/:id", adminRequired, async (req, res) => {
   try {
-    const id = Number(req.params.id);
-    if (!Number.isFinite(id)) {
-      return res.status(400).json({ error: "ID inválido" });
+    const idNum = toInt(req.params.id);
+    if (!idNum) {
+      return res.status(400).json({ error: "Id inválido" });
     }
 
-    // ✅ borrado + renumeración en transacción
-    await prisma.$transaction(async (tx) => {
-      const current = await tx.assignment.findUnique({
-        where: { id },
-        select: { seasonId: true },
-      });
-
-      await tx.assignment.delete({ where: { id } });
-
-      if (current?.seasonId) {
-        await recomputeAndPersistGameNumbers(tx, current.seasonId);
-      }
-    });
-
+    await prisma.assignment.delete({ where: { id: idNum } });
     return res.json({ ok: true });
   } catch (err) {
-    console.error("Error borrando asignación:", err);
-    return res.status(500).json({ error: "No se pudo eliminar la asignación" });
+    console.error("DELETE /assignments/:id error:", err);
+    return res.status(500).json({ error: "Error eliminando asignación." });
   }
 });
 
