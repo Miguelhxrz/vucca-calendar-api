@@ -123,4 +123,58 @@ router.get("/:id", adminRequired, async (req, res) => {
   }
 });
 
+/**
+ * ✅ Actualizar temporada (totalWeeks / isFinished)
+ * PATCH /seasons/:id
+ * body: { totalWeeks?: number, isFinished?: boolean }
+ */
+router.patch("/:id", adminRequired, async (req, res) => {
+  try {
+    const idNum = Number(req.params.id);
+    if (!Number.isFinite(idNum) || idNum <= 0) {
+      return res.status(400).json({ error: "Id inválido" });
+    }
+
+    const { totalWeeks, isFinished } = req.body ?? {};
+    const data = {};
+
+    if (totalWeeks !== undefined) {
+      const weeksNum = Number(totalWeeks);
+      if (!Number.isFinite(weeksNum) || weeksNum <= 0 || weeksNum > 60) {
+        return res.status(400).json({ error: "totalWeeks inválido" });
+      }
+      data.totalWeeks = weeksNum;
+    }
+
+    if (isFinished !== undefined) {
+      if (typeof isFinished !== "boolean") {
+        return res.status(400).json({ error: "isFinished inválido" });
+      }
+      data.isFinished = isFinished;
+    }
+
+    if (Object.keys(data).length === 0) {
+      return res.status(400).json({ error: "Nada que actualizar" });
+    }
+
+    const updated = await prisma.season.update({
+      where: { id: idNum },
+      data,
+    });
+
+    return res.json({ season: updated });
+  } catch (err) {
+    console.error("PATCH /seasons/:id error:", err);
+
+    // Prisma: record not found
+    if (String(err?.code) === "P2025") {
+      return res.status(404).json({ error: "Temporada no encontrada" });
+    }
+
+    return res
+      .status(500)
+      .json({ error: "Error actualizando temporada desde el servidor." });
+  }
+});
+
 export default router;
